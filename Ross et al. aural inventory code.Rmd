@@ -1,0 +1,1576 @@
+---
+title: 'Aural Inventory: Updated 7 October 2020'
+output:
+  html_document:
+    df_print: paged
+---
+
+NB: if Error in .Call("FreeADFunObject", ptr, PACKAGE = DLL) :  "FreeADFunObject" not available for .Call() for package "glmmTMB" message shows, it is a version issue with the glmmTMB and TMB packages. See for debug help: <https://stackoverflow.com/questions/63514287/error-with-glmmtmb-cant-call-freeadfunobject>
+
+This Notebook accompanies the analyses from Ross _et al._ (Submitted) as part of the aural inventory project using acoustic monitoring data from the OKEON churamori project (<https://okeon.unit.oist.jp/>). Data used in this Notebook is available from github. 
+
+First we need to load in our data which comprises the results of our aural inventory, and the processed soundscape analyses. Note that following Bradfer-Lawrence _et al._ (2020), we have standardised our soundscape indices 0-1 and added site-specific mean species richness values (and site x month specific means):
+
+```{r}
+
+# load relevant packages - you may need to install these
+library(ggplot2)
+require(viridis)
+require(readr)
+require(MuMIn)
+require(nlme)
+require(lme4)
+require(patchwork)
+require(glmmTMB)
+
+# load in standardised soundscape data and results of aural inventory
+load("~/Desktop/Research/In progress/2019 Aural Inventory/Docs/Github upload/Ross et al. Aural inventory data.Rda")
+
+```
+
+# Modelling soundscape indices against site-specific mean richness
+
+We aim to determine whether obserbed richness (i.e. the number of unique biological sounds identified in each recording during our aural inventory) is related to each soundscape index. To do this, we'll use glmmTMB (Brooks _et al._ 2017) to fit binary GLMM models. 
+
+First let's fit simple models without considering differences between seasons in the relationship between richness and soundscape indices: 
+
+```{r,include=FALSE}
+
+Model.Out<-list()
+for (i in 1:11) { # for each soundscape index in turn
+  
+  # get the soundscape index in question
+  Index<-Standard[,i+6] 
+  
+  # build a full model as specified above
+  model<-glmmTMB(Index ~ mean.rich + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+
+  # store the results
+  Model.Out[[i]]<-model
+
+  rm(Index,model)
+} 
+beepr::beep(sound = 3) # Adding beepr::beep at the end makes R sing to you when it's finished!
+
+```
+
+So we've stored those GLMMs as a list - a different soundscape index model for each element of the list.
+
+Next, we want to extract the useful information from these models. That is, the model slope values, standard errors, Z-scores/T-statistics, and significance (P-values). We'll make a dataframe to store this information and then extract the appropriate data from our list of models.
+
+```{r}
+
+# get dataframe of model slopes and significance for each index
+GLMM.results<-as.data.frame(matrix(data = NA,nrow = 11))
+colnames(GLMM.results)<-"Index"
+GLMM.results$Index<-as.character(colnames(Standard)[c(7:17)])
+GLMM.results$model.slope<-NA
+GLMM.results$slope.se<-NA
+GLMM.results$T.stat<-NA
+GLMM.results$p.val<-NA
+GLMM.results$significant<-1
+
+# write function for calculating P value from T statistic
+multi.slope_P<-function(T.stat,model){
+  P.Val<-if(T.stat <= 0){ # T stat if negative
+    pt(T.stat, 
+       df = nrow(Standard)-length(coef(summary(model))$cond), # calculate degrees of freedom
+       lower.tail = TRUE)*2 # make it 2-tailed
+    } else{
+      pt(T.stat, # T stat if positive
+         df = nrow(Standard)-length(coef(summary(model))$cond), # calculate degrees of freedom
+         lower.tail = FALSE)*2 # make it 2-tailed
+      }
+  return(P.Val)
+}
+
+```
+
+We can manually calculate p-values for model slopes that aren't displayed in the original table of coefficients by using the ratio of the model slope and its standard error to produce a T-statistic, and from there calculating a p value. See this datascienceplus example of how to calculate model slopes and p values for models with an interaction: <https://datascienceplus.com/assessing-significance-of-slopes-in-regression-models-with-interaction/> 
+
+Note: this is more useful when fitting the interactive models below than in this first instance.
+
+```{r}
+
+# Loop through models of all indices
+for (i in 1:length(Model.Out)) {
+  
+  # get the model slope
+  a<-coef(summary(Model.Out[[i]]))$cond[2]
+
+  # store model slope in our dataframe
+  GLMM.results$model.slope[GLMM.results$Index %in% colnames(Standard)[i+6]]<-a
+
+  #get the standard error for the model slope
+  se.a<-coef(summary(Model.Out[[i]]))$cond[2,2]
+
+  # store standard error in our dataframe
+  GLMM.results$slope.se[GLMM.results$Index %in% colnames(Standard)[i+6]]<-se.a
+
+  # store T statistic in our dataframe
+  GLMM.results$T.stat[GLMM.results$Index %in% colnames(Standard)[i+6]]<-a/se.a
+
+  # get P value for model slopes from T statistic using multi.slope_P() function generated above
+  P.a<-multi.slope_P(T.stat = a/se.a,model = Model.Out[[i]]) 
+  # Note that here this is equivalent to calculating P based on the Z-values from the coef table
+
+  # Store significance (2-sided P value) in our dataframe
+  GLMM.results$p.val[GLMM.results$Index %in% colnames(Standard)[i+6]]<-P.a
+
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.results$significant[GLMM.results$p.val > 0.05]<-0
+
+```
+
+Now let's make a quick plot showing the slopes and signficiance of these models:
+
+```{r}
+
+# reorder the indices based on model slope values:
+GLMM.results$abs<-abs(GLMM.results$model.slope)
+GLMM.results$Index<-as.character(GLMM.results$Index)
+
+GLMM.results$Index<-parse_factor(x = GLMM.results$Index, # factorise indices by model slope results
+                                 ordered = TRUE, 
+                                 include_na = F, 
+                                 levels = unique(GLMM.results$Index[order(GLMM.results$abs)]))
+
+GLMM.results<-GLMM.results[order(GLMM.results$Index),] # Reorder dataframe around new factor levels
+
+# change significance to factor for plotting
+GLMM.results$significant<-as.character(GLMM.results$significant)
+GLMM.results$significant<-parse_factor(x = GLMM.results$significant,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+
+```
+
+```{r}
+
+# Plot the results
+ggplot(data = GLMM.results,
+       mapping = aes(x = Index, 
+                     y = model.slope, 
+                     ymin = model.slope-slope.se, 
+                     ymax = model.slope+slope.se, 
+                     label = round(model.slope,digits = 2))) +
+  xlab("Soundscape Index") + 
+  ylab("Performance (Model Slope)") +
+  theme_classic() + guides(alpha = FALSE) +
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(colour = "black"),) + 
+  geom_hline(yintercept = 0,
+             linetype=2) +
+  geom_pointrange(aes(shape=significant),
+                  position = position_dodge(width = 0.75),
+                  fatten = 5) + 
+  geom_text(aes(label=round(model.slope,digits = 2)),
+            position = position_dodge(width = 0.75),
+            hjust=-0.25,
+            vjust=-0.25) +
+  scale_y_continuous(limits = c(-1,1),
+                     breaks = c(-1,-0.75,-0.5,-0.25,0,0.25,0.5,0.75,1)) + 
+  scale_shape_manual(values = c(1,8), 
+                     guide = FALSE) +
+  coord_flip()
+
+```
+
+So this figure shows us in decending order which indices perform well in terms of their model slope for the relationship between soundscape index values and mean site-level richness. Significant model slopes based on the coefficients table are marked with stars. Nonsignificant results are marked with circles.
+
+
+# Seasonal differences in index ~ richness relationships
+
+As often pointed out in the soundscape literature, seasonal patterns in the soundscape can influence soundscape index values. So an interesting and important question in our case is to what degree seasonality affects the relationship between soundscape indices and observed richness. 
+
+We can use the mean.rich_Szn data to model mean season and site-specific richness values against each soundscape index in turn, using the same GLMM approach as before. This time, though, we'll include an interactive effect with richness to see how the models for different seasons look:
+
+```{r, include=FALSE}
+# create empty lists to store models and results from dredge()
+Model.Out_Szn<-list() 
+Dredge.Out_Szn<-list()
+
+for (i in 1:11) { # for each soundscape index in turn
+  
+  # get the soundscape index in question
+  Index<-Standard[,i+6] 
+  
+  # build a full model as specified above
+  model<-glmmTMB(Index ~ mean.rich_Szn * Season + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  # model selection using AIC
+  dredge.out<-dredge(global.model = model,
+                     beta = "none",
+                     evaluate = TRUE,
+                     rank = "AIC")
+  
+  # bind on a column naming the soundscape index
+  dredge.out$Index<-print(colnames(Standard)[i+6]) 
+  
+  # store the results
+  Model.Out_Szn[[i]]<-model
+  Dredge.Out_Szn[[i]]<-dredge.out
+  
+  rm(Index,dredge.out)
+}  
+beepr::beep(sound = 3)
+
+```
+
+Okay so now we have a seasonal variant of our GLMM models which considers an interaction between richness and season. Our dredge results (not shown) tell us that the interaction term was included in all best fitting models, so we'll consider seasons separately for all of our soundscape indices (see Fig. S1). Let's do the same as above and extract the model slopes, standard errors etc. from the models. We'll make a dataframe to store this information and then extract the appropriate data from our list of models.
+
+```{r}
+
+# get dataframe of model slopes and significance for each index x season
+GLMM.results_Szn<-as.data.frame(matrix(data = NA,nrow = 44))
+colnames(GLMM.results_Szn)<-"Index"
+GLMM.results_Szn$Index<-rep(as.character(colnames(Standard)[c(7:17)]),each=4)
+GLMM.results_Szn$Season<-rep(c('Spring','Summer','Autumn','Winter'),11)
+GLMM.results_Szn$model.slope<-NA
+GLMM.results_Szn$slope.se<-NA
+GLMM.results_Szn$T.stat<-NA
+GLMM.results_Szn$p.val<-NA
+GLMM.results_Szn$significant<-1
+
+```
+
+Now we can use the same code as above to get our model coefficients for each season. The order of the coefficients is always spring, summer, winter, autumn. So we're okay to manually assign a, b, c, and d as the different seasons;
+
+```{r}
+
+# Loop through models of all indices
+for (i in 1:length(Model.Out_Szn)) {
+  
+  # get the model slopes
+  a<-coef(summary(Model.Out_Szn[[i]]))$cond[2]
+  b<-coef(summary(Model.Out_Szn[[i]]))$cond[2]+coef(summary(Model.Out_Szn[[i]]))$cond[6]
+  c<-coef(summary(Model.Out_Szn[[i]]))$cond[2]+coef(summary(Model.Out_Szn[[i]]))$cond[7]
+  d<-coef(summary(Model.Out_Szn[[i]]))$cond[2]+coef(summary(Model.Out_Szn[[i]]))$cond[8]
+
+  # store model slopes in our dataframe
+  GLMM.results_Szn$model.slope[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Spring']<-a
+  GLMM.results_Szn$model.slope[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Summer']<-b
+  GLMM.results_Szn$model.slope[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Autumn']<-d
+  GLMM.results_Szn$model.slope[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Winter']<-c
+  
+  #get the standard error for the model slopes
+  se.a<-coef(summary(Model.Out_Szn[[i]]))$cond[2,2]
+  se.b<-sqrt(vcov(Model.Out_Szn[[i]])$cond[2,2]+vcov(Model.Out_Szn[[i]])$cond[6,6]+(2*vcov(Model.Out_Szn[[i]])$cond[2,6]))
+  se.c<-sqrt(vcov(Model.Out_Szn[[i]])$cond[2,2]+vcov(Model.Out_Szn[[i]])$cond[7,7]+(2*vcov(Model.Out_Szn[[i]])$cond[2,7]))
+  se.d<-sqrt(vcov(Model.Out_Szn[[i]])$cond[2,2]+vcov(Model.Out_Szn[[i]])$cond[8,8]+(2*vcov(Model.Out_Szn[[i]])$cond[2,8]))
+
+  # store standard errors in our dataframe
+  GLMM.results_Szn$slope.se[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Spring']<-se.a
+  GLMM.results_Szn$slope.se[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Summer']<-se.b
+  GLMM.results_Szn$slope.se[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Autumn']<-se.d
+  GLMM.results_Szn$slope.se[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Winter']<-se.c
+
+  # store T statistics in our dataframe
+  GLMM.results_Szn$T.stat[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Spring']<-a/se.a
+  GLMM.results_Szn$T.stat[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Summer']<-b/se.b
+  GLMM.results_Szn$T.stat[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Autumn']<-d/se.d
+  GLMM.results_Szn$T.stat[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Winter']<-c/se.c
+
+  # get P values for model slopes from T statistic using multi.slope_P() function generated above
+  P.a<-multi.slope_P(T.stat = a/se.a,model = Model.Out_Szn[[i]]) 
+  P.b<-multi.slope_P(T.stat = b/se.b,model = Model.Out_Szn[[i]])
+  P.c<-multi.slope_P(T.stat = c/se.c,model = Model.Out_Szn[[i]])
+  P.d<-multi.slope_P(T.stat = d/se.d,model = Model.Out_Szn[[i]])
+  # Note that for a, this is equivalent to calculating P based on the Z-values from the coef table
+
+  # Store significance (2-sided P values) in our dataframe
+  GLMM.results_Szn$p.val[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Spring']<-P.a
+  GLMM.results_Szn$p.val[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Summer']<-P.b
+  GLMM.results_Szn$p.val[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Autumn']<-P.d
+  GLMM.results_Szn$p.val[GLMM.results_Szn$Index %in% colnames(Standard)[i+6] & GLMM.results_Szn$Season %in% 'Winter']<-P.c
+  
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.results_Szn$significant[GLMM.results_Szn$p.val > 0.05]<-0
+
+```
+
+Now let's again plot the slopes and signficiance of these models, this time including differences among seasons:
+
+```{r}
+
+# reorder the indices based on model slope values:
+GLMM.results_Szn$abs<-abs(GLMM.results_Szn$model.slope)
+GLMM.results_Szn$Index<-as.character(GLMM.results_Szn$Index)
+
+GLMM.results_Szn$Index<-parse_factor(x = GLMM.results_Szn$Index, # factorise indices by model slope results
+                                 ordered = TRUE, 
+                                 include_na = F, 
+                                 levels = unique(GLMM.results_Szn$Index[order(GLMM.results_Szn$abs)]))
+
+GLMM.results_Szn<-GLMM.results_Szn[order(GLMM.results_Szn$Index),] # Reorder dataframe around new factor levels
+
+# change significance to factor for plotting
+GLMM.results_Szn$significant<-as.character(GLMM.results_Szn$significant)
+GLMM.results_Szn$significant<-parse_factor(x = GLMM.results_Szn$significant,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+
+```
+
+```{r}
+
+# Plot the results
+ggplot(data = GLMM.results_Szn,
+       mapping = aes(x = Index, 
+                     y = model.slope, 
+                     ymin = model.slope-slope.se, 
+                     ymax = model.slope+slope.se, 
+                     label = round(model.slope,digits = 2)),
+       group = Season) +
+  xlab("Soundscape Index") + 
+  ylab("Performance (Model Slope)") +
+  theme_classic() + guides(alpha = FALSE) +
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(colour = "black"),) + 
+  geom_hline(yintercept = 0,
+             linetype=2) +
+  geom_pointrange(aes(col = Season,
+                      shape=significant),
+                  position = position_dodge(width = 0.75),
+                  fatten = 5) + 
+  geom_text(aes(label=round(model.slope,digits = 2),
+                group = Season),
+            position = position_dodge(width = 0.75),
+            hjust=-0.25,
+            vjust=-0.25) +
+  scale_y_continuous(limits = c(-1,1),
+                     breaks = c(-1,-0.75,-0.5,-0.25,0,0.25,0.5,0.75,1)) + 
+  scale_shape_manual(values = c(1,8), 
+                     guide = FALSE) +
+  coord_flip() +
+  scale_colour_viridis_d(direction = -1,
+                         end = 0.9,
+                         guide = guide_legend(reverse = TRUE)) 
+
+```
+
+
+# Correlations between soundscape indices
+
+Now that we have an understanding of which indices correlate with richess as a whole and when consdering seasonal differences, we'll next look at how the soundscape indices in our study relate to each other - are there suites of indices which are all highly correlated? 
+
+To answer this, we'll use the requery_cormat function. 
+
+See <http://www.sthda.com/english/wiki/correlation-matrix-an-r-function-to-do-all-you-need>
+
+```{r}
+
+# source rquery.cormat code
+source("http://www.sthda.com/upload/rquery_cormat.r")
+
+# isolate soundscape indices from the SoundData object
+Index.Only<-SoundData[,c(7:17)]
+
+# next use the base function cor() to produce a correlation matrix of our indices
+Index.cormat<-cor(Index.Only)
+
+# Now we'll produce the version of the correlation matrix made by rquery.cormat(), and in doing so we'll produce a correlation figure
+
+  # create diverging colour palette of viridis colours
+Virid_colramp<-colorRampPalette(colors = c("#440154FF", "white", "#BBDF27FF")) 
+RQ.cormat<-rquery.cormat(Index.cormat,type = "lower",col = Virid_colramp(20))
+
+# we can examine the values of the correlation coefficient by calling $r
+RQ.cormat$r
+
+# and we can get the p-value of the correlation using $p
+RQ.cormat$p
+
+```
+
+# Calculating sensitivity of soundscape indices
+
+Now let's move onto the main aim of this project, which is to test the sensitivity of different soundscape indices to three sonic conditions: insect noise, geophony, and anthropophony. To test this sensitivity, we'll look for changes in the model slope of the index-richness relationship. 
+
+First, let's fit the same main models (not accounting for seasonality just yet) but with an interaction between richness and each sonic condition in turn. The sonic conditions are coded as binary variables (0,1), so we'll need to convert them to factors before including them in models.
+
+We'll make and store 3 separate models for the different sonic conditions:
+
+```{r,include=FALSE}
+
+Insect.model<-list()
+Geo.model<-list()
+Anthro.model<-list()
+dredge.insect<-list()
+dredge.geo<-list()
+dredge.anthro<-list()
+
+for (i in 1:11) { # for each soundscape index in turn
+  
+  # get the soundscape index in question
+  Index<-Standard[,i+6] 
+  
+  # build full models as specified above and store the results
+  Insect.model[[i]]<-glmmTMB(Index ~ mean.rich * Cicadas.Stridulations + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+
+  Geo.model[[i]]<-glmmTMB(Index ~ mean.rich * Wind_rain + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Anthro.model[[i]]<-glmmTMB(Index ~ mean.rich * Anthrophony + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  # model selection using AIC
+  dredge.insect[[i]]<-dredge(global.model = Insect.model[[i]],
+                     beta = "none",
+                     evaluate = TRUE,
+                     rank = "AIC")
+  
+  dredge.geo[[i]]<-dredge(global.model = Geo.model[[i]],
+                     beta = "none",
+                     evaluate = TRUE,
+                     rank = "AIC")
+  
+  dredge.anthro[[i]]<-dredge(global.model = Anthro.model[[i]],
+                     beta = "none",
+                     evaluate = TRUE,
+                     rank = "AIC")
+  
+  # bind on a column naming the soundscape index
+  dredge.insect[[i]]$Index<-print(colnames(Standard)[i+6]) 
+  dredge.geo[[i]]$Index<-print(colnames(Standard)[i+6]) 
+  dredge.anthro[[i]]$Index<-print(colnames(Standard)[i+6]) 
+  
+  rm(Index)
+} 
+beepr::beep(sound = 3) # Adding beepr::beep at the end makes R sing to you when it's finished!
+
+```
+
+We've again stored those GLMMs as a list - a different soundscape index model for each element of the list.
+
+A quick look at the dredge results (not shown) tells us that whilst an interaction between our binary variable and richness isn't always included in the best performing model, it is in all cases within the list of candidate models based on model weighting, and has ACI < 4 in all cases (the vast majority are AIC < 2). 
+
+The question of interest to us is the degree to which these binary variables affect the soundscape ~ richness model slope (or not!) so we'll extract information on slope differences from the models. For our purpose, we're not just interested in whether the model slope is different and in which direction (i.e. does model slope increase or decrease), we want to know the _absolute_ difference in model slope. That is, does the slope of the relationship between site-level richness and a given soundscape index get stronger (regardless of whether the model slope is positive or negative) or weaker.
+
+```{r}
+
+# get dataframe of model slopes and significance for each index
+GLMM.results_Ins<-as.data.frame(matrix(data = NA,nrow = 11))
+colnames(GLMM.results_Ins)<-"Index"
+GLMM.results_Ins$Index<-as.character(colnames(Standard)[c(7:17)])
+GLMM.results_Ins$control.slope<-NA
+GLMM.results_Ins$binary.slope<-NA
+GLMM.results_Ins$binary.T<-NA
+GLMM.results_Ins$binary.pval<-NA
+GLMM.results_Ins$binary.sig<-1
+GLMM.results_Ins$slope.diff<-NA
+GLMM.results_Ins$diff.se<-NA
+GLMM.results_Ins$diff.T<-NA
+GLMM.results_Ins$diff.pval<-NA
+GLMM.results_Ins$diff.sig<-1
+GLMM.results_Ins$abs.diff<-NA
+GLMM.results_Geo<-GLMM.results_Ins
+GLMM.results_Anth<-GLMM.results_Ins
+
+# write function for getting the absolute model slope which tells us the change in the slope 'strength'
+abs.model.slope<-function(slope1,slope2,slopedif){
+  
+  # function requires 3 inputs
+    # slope1 = the original model slope (condition = 0)
+    # slope2 = the updated model slope (condition = 1)
+    # slopedif = the difference in model slope from the model coefficients
+  
+  if(sign(slope1) + sign(slope2) != 0 & abs(slope1) < abs(slope2)){ # if slope sign = same & new slope = more extreme
+    return(abs(slopedif)) # return the absolute slope as a positive value
+  } else{ # if not
+      return(-abs(slopedif)) # return the absolute slope as a negative value
+  }
+}
+
+```
+
+So we're interested in the absolute value of the change in model slope (i.e. does the relationship between richness and soundscape index values get stronger or weaker?). To get that information, we first need the original model slope, the mode slope under our confounding sonic condition (labelled binary.slope above) and the significance of this model slope, the difference in slope, and then finally the absolute difference which accounts for the sign of the relationship (positive or negative). As we did above for our baseline GLMMs, we can extract this information from the model coefficients.
+
+```{r}
+
+# Loop through models of all indices for insect sounds
+for (i in 1:length(Insect.model)) {
+
+  # get the model slopes
+  a<-coef(summary(Insect.model[[i]]))$cond[2] # insects = 0
+  b<-coef(summary(Insect.model[[i]]))$cond[2]+coef(summary(Insect.model[[i]]))$cond[4] # insects = 1
+
+  # store model slopes in our dataframe
+  GLMM.results_Ins$control.slope[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-a
+  GLMM.results_Ins$binary.slope[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-b
+  
+  #get the standard error for the model slope of sonic condition = 1
+  se.b<-sqrt(vcov(Insect.model[[i]])$cond[2,2]+vcov(Insect.model[[i]])$cond[4,4]+(2*vcov(Insect.model[[i]])$cond[2,4]))  
+
+  # Store T statistic for model slope of sonic condition = 1
+  GLMM.results_Ins$binary.T[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-b/se.b
+  
+  # get P values for model slopes from T statistic using multi.slope_P() function generated above
+  P.b<-multi.slope_P(T.stat = b/se.b,model = Insect.model[[i]])
+
+  # Store significance (2-sided P values) for model slope of sonic condition = 1
+  GLMM.results_Ins$binary.pval[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-P.b
+  
+  # get the model slope difference between condition = 0 and condition = 1
+  diff<-coef(summary(Insect.model[[i]]))$cond[4]
+  
+  # store model slope difference 
+  GLMM.results_Ins$slope.diff[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-diff
+  
+  # get the standard error, T value, and p-value for the model slope difference between condition = 0 and condition = 1
+  diff.se<-coef(summary(Insect.model[[i]]))$cond[4,2]
+  diff.T<-coef(summary(Insect.model[[i]]))$cond[4,3]
+  diff.pval<-coef(summary(Insect.model[[i]]))$cond[4,4]
+  
+  # store slope difference standard error
+  GLMM.results_Ins$diff.se[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-diff.se
+
+  # store slope difference T value
+  GLMM.results_Ins$diff.T[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-diff.T
+  
+  # store slope difference p value
+  GLMM.results_Ins$diff.pval[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-diff.pval
+  
+  # calculate the absolute slope difference based on whether slopes get steeper or now
+  GLMM.results_Ins$abs.diff[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]]<-
+    abs.model.slope(slope1 = GLMM.results_Ins$control.slope[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]],
+                slope2 = GLMM.results_Ins$binary.slope[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]],
+                slopedif = GLMM.results_Ins$slope.diff[GLMM.results_Ins$Index %in% colnames(Standard)[i+6]])
+
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.results_Ins$binary.sig[GLMM.results_Ins$binary.pval > 0.05]<-0
+GLMM.results_Ins$diff.sig[GLMM.results_Ins$diff.pval > 0.05]<-0
+
+# Loop through models of all indices for geophony
+for (i in 1:length(Geo.model)) {
+
+  # get the model slopes
+  a<-coef(summary(Geo.model[[i]]))$cond[2]+coef(summary(Geo.model[[i]]))$cond[4] # Geophony = 0
+  b<-coef(summary(Geo.model[[i]]))$cond[2] # Geophony = 1
+
+  # store model slopes in our dataframe
+  GLMM.results_Geo$control.slope[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-a
+  GLMM.results_Geo$binary.slope[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-b
+  
+  #get the standard error for the model slope of sonic condition = 1
+  se.b<-coef(summary(Geo.model[[i]]))$cond[2,2]  
+  
+  # Store T statistic for model slope of sonic condition = 1
+  GLMM.results_Geo$binary.T[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-b/se.b
+  
+  # get P values for model slopes from T statistic using multi.slope_P() function generated above
+  P.b<-multi.slope_P(T.stat = b/se.b,model = Geo.model[[i]])
+
+  # Store significance (2-sided P values) for model slope of sonic condition = 1
+  GLMM.results_Geo$binary.pval[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-P.b
+  
+  # get the model slope difference between condition = 0 and condition = 1
+  diff<-coef(summary(Geo.model[[i]]))$cond[4]
+  
+  # store model slope difference 
+  GLMM.results_Geo$slope.diff[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-diff
+  
+  # get the standard error, T value, and p-value for the model slope difference between condition = 0 and condition = 1
+  diff.se<-coef(summary(Geo.model[[i]]))$cond[4,2]
+  diff.T<-coef(summary(Geo.model[[i]]))$cond[4,3]
+  diff.pval<-coef(summary(Geo.model[[i]]))$cond[4,4]
+  
+  # store slope difference standard error
+  GLMM.results_Geo$diff.se[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-diff.se
+
+  # store slope difference T value
+  GLMM.results_Geo$diff.T[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-diff.T
+  
+  # store slope difference p value
+  GLMM.results_Geo$diff.pval[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-diff.pval
+
+  # calculate the absolute slope difference based on whether slopes get steeper or now
+  GLMM.results_Geo$abs.diff[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]]<-
+    abs.model.slope(slope1 = GLMM.results_Geo$control.slope[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]],
+                slope2 = GLMM.results_Geo$binary.slope[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]],
+                slopedif = GLMM.results_Geo$slope.diff[GLMM.results_Geo$Index %in% colnames(Standard)[i+6]])
+
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.results_Geo$binary.sig[GLMM.results_Geo$binary.pval > 0.05]<-0
+GLMM.results_Geo$diff.sig[GLMM.results_Geo$diff.pval > 0.05]<-0
+
+# Loop through models of all indices for anthropophony
+for (i in 1:length(Anthro.model)) {
+
+  # get the model slopes
+  a<-coef(summary(Anthro.model[[i]]))$cond[2]+coef(summary(Anthro.model[[i]]))$cond[4] # Geophony = 0
+  b<-coef(summary(Anthro.model[[i]]))$cond[2] # Geophony = 1
+
+  # store model slopes in our dataframe
+  GLMM.results_Anth$control.slope[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-a
+  GLMM.results_Anth$binary.slope[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-b
+  
+  #get the standard error for the model slope of sonic condition = 1
+  se.b<-coef(summary(Anthro.model[[i]]))$cond[2,2]  
+  
+  # Store T statistic for model slope of sonic condition = 1
+  GLMM.results_Anth$binary.T[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-b/se.b
+  
+  # get P values for model slopes from T statistic using multi.slope_P() function generated above
+  P.b<-multi.slope_P(T.stat = b/se.b,model = Anthro.model[[i]])
+
+  # Store significance (2-sided P values) for model slope of sonic condition = 1
+  GLMM.results_Anth$binary.pval[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-P.b
+  
+  # get the model slope difference between condition = 0 and condition = 1
+  diff<-coef(summary(Anthro.model[[i]]))$cond[4]
+  
+  # store model slope difference 
+  GLMM.results_Anth$slope.diff[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-diff
+  
+  # get the standard error, T value, and p-value for the model slope difference between condition = 0 and condition = 1
+  diff.se<-coef(summary(Anthro.model[[i]]))$cond[4,2]
+  diff.T<-coef(summary(Anthro.model[[i]]))$cond[4,3]
+  diff.pval<-coef(summary(Anthro.model[[i]]))$cond[4,4]
+  
+  # store slope difference standard error
+   GLMM.results_Anth$diff.se[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-diff.se
+
+  # store slope difference T value
+  GLMM.results_Anth$diff.T[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-diff.T
+  
+  # store slope difference p value
+  GLMM.results_Anth$diff.pval[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-diff.pval
+
+  # calculate the absolute slope difference based on whether slopes get steeper or now
+  GLMM.results_Anth$abs.diff[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]]<-
+    abs.model.slope(slope1 = GLMM.results_Anth$control.slope[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]],
+                slope2 = GLMM.results_Anth$binary.slope[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]],
+                slopedif = GLMM.results_Anth$slope.diff[GLMM.results_Anth$Index %in% colnames(Standard)[i+6]])
+
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.results_Anth$binary.sig[GLMM.results_Anth$binary.pval > 0.05]<-0
+GLMM.results_Anth$diff.sig[GLMM.results_Anth$diff.pval > 0.05]<-0
+
+```
+
+So now we have values of the model slope with vs without the potentially confounding sonic conditions, and the absolute difference in model slope the sonic condition causes, plus the significance of the model where the sonic condition is present. Together, this gives us a measure of the sensitivity of different soundscape indices to these sonic conditions - that is, to what degree do these conditions affect the index ~ richness relationship? 
+
+Now let's make a quick plot showing these results:
+
+```{r}
+
+GLMM.results_Sonic<-rbind(GLMM.results_Ins,GLMM.results_Geo,GLMM.results_Anth)
+GLMM.results_Sonic$Condition<-as.character(rep(c("Insects","Geophony","Anthropophony"),each = 11))
+GLMM.results_Sonic$Condition<-parse_factor(GLMM.results_Sonic$Condition,ordered = F,include_na = F)
+
+
+
+# reorder the indices based on model slope values
+GLMM.results_Sonic$Index<-as.character(GLMM.results_Sonic$Index)
+GLMM.results_Sonic$Index<-parse_factor(x = GLMM.results_Sonic$Index, # factorise indices by model slope results
+                                 ordered = TRUE, 
+                                 include_na = F, 
+                                 levels = unique(GLMM.results_Sonic$Index[order(GLMM.results_Sonic$abs.diff)]))
+GLMM.results_Sonic<-GLMM.results_Sonic[order(GLMM.results_Sonic$Index),] # Reorder dataframe around new factor levels
+# change significance to factor for plotting
+GLMM.results_Sonic$binary.sig<-as.character(GLMM.results_Sonic$binary.sig)
+GLMM.results_Sonic$binary.sig<-parse_factor(x = GLMM.results_Sonic$binary.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+GLMM.results_Sonic$diff.sig<-as.character(GLMM.results_Sonic$diff.sig)
+GLMM.results_Sonic$diff.sig<-parse_factor(x = GLMM.results_Sonic$diff.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+
+```
+
+We may have our absolute slope difference values, but as it stands, Sensitivity is a bit counterintuitive. As the value increases, models are less sensitive. So let's quantify our sensitivity metric as the inverse of the absolute difference in model slope: 
+
+```{r}
+
+GLMM.results_Sonic$Sens<-1-GLMM.results_Sonic$abs.diff
+
+```
+
+Let's plot the results:
+
+```{r}
+
+# Plot the results
+ggplot(data = GLMM.results_Sonic,
+       mapping = aes(x = Index, 
+                     y = Sens, 
+                     ymin = Sens-diff.se, 
+                     ymax = Sens+diff.se, 
+                     label = round(abs.diff,digits = 2)),
+       group = Condition) +
+  xlab("Soundscape Index") + 
+  ylab("Index Sensitivity") +
+  theme_classic() + guides(alpha = FALSE) +
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(colour = "black"),) + 
+  geom_hline(yintercept = 1,
+             linetype=2) +
+  geom_pointrange(aes(col = Condition,
+                      shape=diff.sig),
+                  position = position_dodge(width = 0.75),
+                  fatten = 5) + 
+  geom_text(aes(label=round(abs.diff,digits = 2),
+                group = Condition),
+            position = position_dodge(width = 0.75),
+            hjust=-0.25,
+            vjust=-0.25) +
+  scale_y_continuous(limits = c(0.5,1.5),
+                     breaks = c(0.5,0.75,1,1.25,1.5)) + 
+  scale_shape_manual(values = c(1,8), 
+                     guide = FALSE) +
+  coord_flip() +
+  scale_colour_viridis_d(direction = -1,end = 0.9) + 
+  guides(colour = guide_legend(reverse=T,title = "Sonic condition"))
+
+```
+
+# Seasonal effects on soundscape index sensitivity
+
+Finally, let's return to the idea that seasonality is a defining feature of soundscape index performance. We'll model soundscape index sensitivity to our 3 potentially confounding sonic conditions as above, but this time we'll include an interactive effect of season in our GLMMs. 
+
+Again, we'll define sensitivity as the absolute change in model slope of the index~richness relationship. We'll fit models with a 3-way interaction between richness, each sonic condition, and season. Again, sonic conditions are coded as binary variables (0,1), but we already converted them into factors for inclusion in models.
+
+We'll make and store 3 separate models for the different sonic conditions:
+
+```{r,include=FALSE}
+
+Insect.model_Szn<-list()
+Geo.model_Szn<-list()
+Anthro.model_Szn<-list()
+dredge.insect_Szn<-list()
+dredge.geo_Szn<-list()
+dredge.anthro_Szn<-list()
+
+for (i in 1:11) { # for each soundscape index in turn
+  
+  # get the soundscape index in question
+  Index<-Standard[,i+6] 
+  
+  # build full models as specified above and store the results
+  Insect.model_Szn[[i]]<-glmmTMB(Index ~ mean.rich * Cicadas.Stridulations * Season + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+
+  Geo.model_Szn[[i]]<-glmmTMB(Index ~ mean.rich * Wind_rain * Season + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Anthro.model_Szn[[i]]<-glmmTMB(Index ~ mean.rich * Anthrophony * Season + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard,
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  # model selection using AIC
+  dredge.insect_Szn[[i]]<-dredge(global.model = Insect.model_Szn[[i]],
+                     beta = "none",
+                     evaluate = TRUE,
+                     rank = "AIC")
+  
+  dredge.geo_Szn[[i]]<-dredge(global.model = Geo.model_Szn[[i]],
+                     beta = "none",
+                     evaluate = TRUE,
+                     rank = "AIC")
+  
+  dredge.anthro_Szn[[i]]<-dredge(global.model = Anthro.model_Szn[[i]],
+                     beta = "none",
+                     evaluate = TRUE,
+                     rank = "AIC")
+  
+  # bind on a column naming the soundscape index
+  dredge.insect_Szn[[i]]$Index<-print(colnames(Standard)[i+6]) 
+  dredge.geo_Szn[[i]]$Index<-print(colnames(Standard)[i+6]) 
+  dredge.anthro_Szn[[i]]$Index<-print(colnames(Standard)[i+6]) 
+  
+  rm(Index)
+} 
+beepr::beep(sound = 3) # Adding beepr::beep at the end makes R sing to you when it's finished!
+
+```
+
+Once again, we've stored those GLMMs as a list - a different soundscape index model for each element of the list.
+
+A quick look at the dredge results (not shown) tells us that whilst the 3-way interaction between our binary variable, richness, and season isn't always included in the best performing model, it is in all cases within the list of candidate models based on model weighting, and has ACI < 9 in all cases (the vast majority are AIC < 2). 
+
+Our final question then, asks the degree to which our binary variables affect the soundscape ~ richness model slope (or not!) when accounting for seasonal differences. So we'll extract information on slope differences from the models. For our purpose, we're not just interested in whether the model slope is different and in which direction (i.e. does model slope increase/decrease), we want to know the _absolute_ difference in model slope. That is, does the slope of the relationship between site-level richness and a given soundscape index get stronger (regardless of whether the model slope is positive or negative) or weaker.
+
+To get this information, we'll now construct 4 separate models for each condition (one model per season) and store the sensitivity values and standard errors based on the results of these models.
+
+```{r}
+
+# Prepare empty lists
+Insect.model_Spring<-list()
+Insect.model_Summer<-list()
+Insect.model_Autumn<-list()
+Insect.model_Winter<-list()
+Geo.model_Spring<-list()
+Geo.model_Summer<-list()
+Geo.model_Autumn<-list()
+Geo.model_Winter<-list()
+Anthro.model_Spring<-list()
+Anthro.model_Summer<-list()
+Anthro.model_Autumn<-list()
+Anthro.model_Winter<-list()
+
+for (i in 1:11) { # for each soundscape index in turn
+  
+  # get the soundscape index x season combination in question
+  Index_Spring<-Standard[Standard$Season %in% "Spring",i+6] 
+  Index_Summer<-Standard[Standard$Season %in% "Summer",i+6] 
+  Index_Autumn<-Standard[Standard$Season %in% "Autumn",i+6] 
+  Index_Winter<-Standard[Standard$Season %in% "Winter",i+6] 
+
+  # store the insect models for each season
+  Insect.model_Spring[[i]]<-glmmTMB(Index_Spring ~ mean.rich * Cicadas.Stridulations + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Spring",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+
+  Insect.model_Summer[[i]]<-glmmTMB(Index_Summer ~ mean.rich * Cicadas.Stridulations + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Summer",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+
+  Insect.model_Autumn[[i]]<-glmmTMB(Index_Autumn ~ mean.rich * Cicadas.Stridulations + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Autumn",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+
+  Insect.model_Winter[[i]]<-glmmTMB(Index_Winter ~ mean.rich * Cicadas.Stridulations + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Winter",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+
+  # store the geophony models for each season
+  Geo.model_Spring[[i]]<-glmmTMB(Index_Spring ~ mean.rich * Wind_rain + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Spring",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Geo.model_Summer[[i]]<-glmmTMB(Index_Summer ~ mean.rich * Wind_rain + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Summer",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Geo.model_Autumn[[i]]<-glmmTMB(Index_Autumn ~ mean.rich * Wind_rain + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Autumn",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Geo.model_Winter[[i]]<-glmmTMB(Index_Winter ~ mean.rich * Wind_rain + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Winter",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  # store the anthropophony models for each season
+  Anthro.model_Spring[[i]]<-glmmTMB(Index_Spring ~ mean.rich * Anthrophony + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Spring",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Anthro.model_Summer[[i]]<-glmmTMB(Index_Summer ~ mean.rich * Anthrophony + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Summer",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Anthro.model_Autumn[[i]]<-glmmTMB(Index_Autumn ~ mean.rich * Anthrophony + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Autumn",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+  Anthro.model_Winter[[i]]<-glmmTMB(Index_Winter ~ mean.rich * Anthrophony + (1|Site) + (1|TOD),
+              ziformula = ~1,
+              data = Standard[Standard$Season %in% "Winter",],
+              family = beta_family(link = "logit"),
+              REML = FALSE)
+  
+ rm(Index_Spring,Index_Summer,Index_Autumn,Index_Winter)
+} 
+beepr::beep(sound = 3) # Adding beepr::beep at the end makes R sing to you when it's finished!
+
+```
+
+So now we have all of the individual models of each season x sonic condition combination. Let's now create a season-specific version of the sensitivity tables we made earlier:
+
+```{r}
+
+# get dataframe of model slopes and significance for each index
+GLMM.Insect_Szn<-as.data.frame(matrix(data = NA,nrow = 44))
+colnames(GLMM.Insect_Szn)<-"Index"
+GLMM.Insect_Szn$Index<-rep(as.character(colnames(Standard)[c(7:17)]),each=4)
+GLMM.Insect_Szn$Season<-rep(c('Spring','Summer','Autumn','Winter'),11)
+GLMM.Insect_Szn$control.slope<-NA
+GLMM.Insect_Szn$binary.slope<-NA
+GLMM.Insect_Szn$binary.T<-NA
+GLMM.Insect_Szn$binary.pval<-NA
+GLMM.Insect_Szn$binary.sig<-1
+GLMM.Insect_Szn$slope.diff<-NA
+GLMM.Insect_Szn$diff.se<-NA
+GLMM.Insect_Szn$diff.T<-NA
+GLMM.Insect_Szn$diff.pval<-NA
+GLMM.Insect_Szn$diff.sig<-1
+GLMM.Insect_Szn$abs.diff<-NA
+GLMM.Geo_Szn<-GLMM.Insect_Szn
+GLMM.Anthro_Szn<-GLMM.Insect_Szn
+
+```
+
+Again we're interested in the absolute value of the change in model slope (i.e. does the relationship between richness and soundscape index values get stronger or weaker?). To get that information, we first need the original model slope, the mode slope under our confounding sonic condition (labelled binary.slope above) and the significance of this model slope, the difference in slope, and then finally the absolute difference which accounts for the sign of the relationship (positive or negative). As we did above, we can extract all of this information from the model coefficients.
+
+```{r}
+
+# Loop through models of all indices for insect sounds
+for (i in 1:length(Insect.model_Szn)) {
+
+  # get the model slopes
+  spring0<-coef(summary(Insect.model_Spring[[i]]))$cond[2] # insects = 0, Spring
+  spring1<-coef(summary(Insect.model_Spring[[i]]))$cond[2]+coef(summary(Insect.model_Spring[[i]]))$cond[4] # insects = 1, spring
+  summer0<-coef(summary(Insect.model_Summer[[i]]))$cond[2] # insects = 0, summer
+  summer1<-coef(summary(Insect.model_Summer[[i]]))$cond[2]+coef(summary(Insect.model_Summer[[i]]))$cond[4] # insects = 1, summer
+  Autumn0<-coef(summary(Insect.model_Autumn[[i]]))$cond[2] # insects = 0, Autumn
+  Autumn1<-coef(summary(Insect.model_Autumn[[i]]))$cond[2]+coef(summary(Insect.model_Autumn[[i]]))$cond[4] # insects = 1, Autumn
+  Winter0<-coef(summary(Insect.model_Winter[[i]]))$cond[2] # insects = 0, Winter
+  Winter1<-coef(summary(Insect.model_Winter[[i]]))$cond[2]+coef(summary(Insect.model_Winter[[i]]))$cond[4] # insects = 1, Winter
+  
+  
+  # store model slopes in our dataframe
+  GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-spring0
+  GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-spring1
+  GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-summer0
+  GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-summer1
+  GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-Autumn0
+  GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-Autumn1
+  GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-Winter0
+  GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-Winter1
+
+  
+  #get the standard error for the model slope of sonic condition = 1
+  se.spring1<-sqrt(vcov(Insect.model_Spring[[i]])$cond[2,2]+vcov(Insect.model_Spring[[i]])$cond[4,4]+(2*vcov(Insect.model_Spring[[i]])$cond[2,4]))  
+  se.summer1<-sqrt(vcov(Insect.model_Summer[[i]])$cond[2,2]+vcov(Insect.model_Summer[[i]])$cond[4,4]+(2*vcov(Insect.model_Summer[[i]])$cond[2,4])) 
+  se.autumn1<-sqrt(vcov(Insect.model_Autumn[[i]])$cond[2,2]+vcov(Insect.model_Autumn[[i]])$cond[4,4]+(2*vcov(Insect.model_Autumn[[i]])$cond[2,4]))
+  se.winter1<-sqrt(vcov(Insect.model_Winter[[i]])$cond[2,2]+vcov(Insect.model_Winter[[i]])$cond[4,4]+(2*vcov(Insect.model_Winter[[i]])$cond[2,4])) 
+  
+  
+  # Store T statistic for model slope of sonic condition = 1
+  GLMM.Insect_Szn$binary.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-spring1/se.spring1
+  GLMM.Insect_Szn$binary.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-summer1/se.summer1
+  GLMM.Insect_Szn$binary.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-Autumn1/se.autumn1
+  GLMM.Insect_Szn$binary.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-Winter1/se.winter1
+  
+  
+  # get P values for model slopes from T statistic using multi.slope_P() function generated above
+  P.spring1<-multi.slope_P(T.stat = spring1/se.spring1,model = Insect.model_Spring[[i]])
+  P.summer1<-multi.slope_P(T.stat = summer1/se.summer1,model = Insect.model_Summer[[i]])
+  P.autumn1<-multi.slope_P(T.stat = Autumn1/se.autumn1,model = Insect.model_Autumn[[i]])
+  P.winter1<-multi.slope_P(T.stat = Winter1/se.winter1,model = Insect.model_Winter[[i]])
+  
+  # Store significance (2-sided P values) for model slope of sonic condition = 1
+  GLMM.Insect_Szn$binary.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-P.spring1
+  GLMM.Insect_Szn$binary.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-P.summer1
+  GLMM.Insect_Szn$binary.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-P.autumn1
+  GLMM.Insect_Szn$binary.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-P.winter1
+  
+
+  # get the model slope difference between condition = 0 and condition = 1
+  dif.spring<-coef(summary(Insect.model_Spring[[i]]))$cond[4]
+  dif.summer<-coef(summary(Insect.model_Summer[[i]]))$cond[4]
+  dif.autumn<-coef(summary(Insect.model_Autumn[[i]]))$cond[4]
+  dif.winter<-coef(summary(Insect.model_Winter[[i]]))$cond[4]
+
+  
+  # store model slope difference 
+  GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-dif.spring
+  GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-dif.summer
+  GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-dif.autumn
+  GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-dif.winter
+  
+  
+  # get the standard error, T value, and p-value for the model slope difference between condition = 0 and condition = 1
+  diff.se.spring<-coef(summary(Insect.model_Spring[[i]]))$cond[4,2]
+  diff.T.spring<-coef(summary(Insect.model_Spring[[i]]))$cond[4,3]
+  diff.p.spring<-coef(summary(Insect.model_Spring[[i]]))$cond[4,4]
+  diff.se.summer<-coef(summary(Insect.model_Summer[[i]]))$cond[4,2]
+  diff.T.summer<-coef(summary(Insect.model_Summer[[i]]))$cond[4,3]
+  diff.p.summer<-coef(summary(Insect.model_Summer[[i]]))$cond[4,4]
+  diff.se.autumn<-coef(summary(Insect.model_Autumn[[i]]))$cond[4,2]
+  diff.T.autumn<-coef(summary(Insect.model_Autumn[[i]]))$cond[4,3]
+  diff.p.autumn<-coef(summary(Insect.model_Autumn[[i]]))$cond[4,4]
+  diff.se.winter<-coef(summary(Insect.model_Winter[[i]]))$cond[4,2]
+  diff.T.winter<-coef(summary(Insect.model_Winter[[i]]))$cond[4,3]
+  diff.p.winter<-coef(summary(Insect.model_Winter[[i]]))$cond[4,4]
+  
+ 
+  # store slope difference standard error
+  GLMM.Insect_Szn$diff.se[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-diff.se.spring
+  GLMM.Insect_Szn$diff.se[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-diff.se.summer
+  GLMM.Insect_Szn$diff.se[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-diff.se.autumn
+  GLMM.Insect_Szn$diff.se[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-diff.se.winter
+  
+  
+  # store slope difference T value
+  GLMM.Insect_Szn$diff.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-diff.T.spring
+  GLMM.Insect_Szn$diff.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-diff.T.summer
+  GLMM.Insect_Szn$diff.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-diff.T.autumn
+  GLMM.Insect_Szn$diff.T[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-diff.T.winter
+  
+  
+  # store slope difference p value
+  GLMM.Insect_Szn$diff.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-diff.p.spring
+  GLMM.Insect_Szn$diff.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-diff.p.summer
+  GLMM.Insect_Szn$diff.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-diff.p.autumn
+  GLMM.Insect_Szn$diff.pval[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-diff.p.winter
+ 
+  
+  # calculate the absolute slope difference based on whether slopes get steeper or not
+  GLMM.Insect_Szn$abs.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring']<-
+    abs.model.slope(slope1 = GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring'],
+                slope2 = GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring'],
+                slopedif = GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Spring'])
+
+  GLMM.Insect_Szn$abs.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer']<-
+    abs.model.slope(slope1 = GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer'],
+                slope2 = GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer'],
+                slopedif = GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Summer'])
+
+  GLMM.Insect_Szn$abs.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn']<-
+    abs.model.slope(slope1 = GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn'],
+                slope2 = GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn'],
+                slopedif = GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Autumn'])
+  
+  GLMM.Insect_Szn$abs.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter']<-
+    abs.model.slope(slope1 = GLMM.Insect_Szn$control.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter'],
+                slope2 = GLMM.Insect_Szn$binary.slope[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter'],
+                slopedif = GLMM.Insect_Szn$slope.diff[GLMM.Insect_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Insect_Szn$Season %in% 'Winter'])
+
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.Insect_Szn$binary.sig[GLMM.Insect_Szn$binary.pval > 0.05]<-0
+GLMM.Insect_Szn$diff.sig[GLMM.Insect_Szn$diff.pval > 0.05]<-0
+
+```
+
+```{r}
+
+# Loop through models of all indices for geophony
+for (i in 1:length(Geo.model_Szn)) {
+
+  # get the model slopes
+  spring0<-coef(summary(Geo.model_Spring[[i]]))$cond[2]+coef(summary(Geo.model_Spring[[i]]))$cond[4] # Geophony = 0, spring
+  spring1<-coef(summary(Geo.model_Spring[[i]]))$cond[2] # Geophony = 1, Spring
+  summer0<-coef(summary(Geo.model_Summer[[i]]))$cond[2]+coef(summary(Geo.model_Summer[[i]]))$cond[4] # Geophony = 0, summer
+  summer1<-coef(summary(Geo.model_Summer[[i]]))$cond[2] # Geophony = 1, summer
+  Autumn0<-coef(summary(Geo.model_Autumn[[i]]))$cond[2]+coef(summary(Geo.model_Autumn[[i]]))$cond[4] # Geophony = 0, Autumn
+  Autumn1<-coef(summary(Geo.model_Autumn[[i]]))$cond[2] # Geophony = 1, Autumn
+  Winter0<-coef(summary(Geo.model_Winter[[i]]))$cond[2]+coef(summary(Geo.model_Winter[[i]]))$cond[4] # Geophony = 0, Winter
+  Winter1<-coef(summary(Geo.model_Winter[[i]]))$cond[2] # Geophony = 1, Winter
+  
+  
+  # store model slopes in our dataframe
+  GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-spring0
+  GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-spring1
+  GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-summer0
+  GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-summer1
+  GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-Autumn0
+  GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-Autumn1
+  GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-Winter0
+  GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-Winter1
+  
+  
+  #get the standard error for the model slope of sonic condition = 1
+  se.spring1<-sqrt(vcov(Geo.model_Spring[[i]])$cond[2,2]+vcov(Geo.model_Spring[[i]])$cond[4,4]+(2*vcov(Geo.model_Spring[[i]])$cond[2,4]))  
+  se.summer1<-sqrt(vcov(Geo.model_Summer[[i]])$cond[2,2]+vcov(Geo.model_Summer[[i]])$cond[4,4]+(2*vcov(Geo.model_Summer[[i]])$cond[2,4]))  
+  se.autumn1<-sqrt(vcov(Geo.model_Autumn[[i]])$cond[2,2]+vcov(Geo.model_Autumn[[i]])$cond[4,4]+(2*vcov(Geo.model_Autumn[[i]])$cond[2,4]))  
+  se.winter1<-sqrt(vcov(Geo.model_Winter[[i]])$cond[2,2]+vcov(Geo.model_Winter[[i]])$cond[4,4]+(2*vcov(Geo.model_Winter[[i]])$cond[2,4]))  
+  
+  # Store T statistic for model slope of sonic condition = 1
+  GLMM.Geo_Szn$binary.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-spring1/se.spring1
+  GLMM.Geo_Szn$binary.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-summer1/se.summer1
+  GLMM.Geo_Szn$binary.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-Autumn1/se.autumn1
+  GLMM.Geo_Szn$binary.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-Winter1/se.winter1
+
+  
+  # get P values for model slopes from T statistic using multi.slope_P() function generated above
+  P.spring1<-multi.slope_P(T.stat = spring1/se.spring1,model = Geo.model_Spring[[i]])
+  P.summer1<-multi.slope_P(T.stat = summer1/se.summer1,model = Geo.model_Summer[[i]])
+  P.autumn1<-multi.slope_P(T.stat = Autumn1/se.autumn1,model = Geo.model_Autumn[[i]])
+  P.winter1<-multi.slope_P(T.stat = Winter1/se.winter1,model = Geo.model_Winter[[i]])
+  
+  
+  # Store significance (2-sided P values) for model slope of sonic condition = 1
+  GLMM.Geo_Szn$binary.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-P.spring1
+  GLMM.Geo_Szn$binary.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-P.summer1
+  GLMM.Geo_Szn$binary.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-P.autumn1
+  GLMM.Geo_Szn$binary.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-P.winter1
+
+  
+  # get the model slope difference between condition = 0 and condition = 1
+  dif.spring<-coef(summary(Geo.model_Spring[[i]]))$cond[4]
+  dif.summer<-coef(summary(Geo.model_Summer[[i]]))$cond[4]
+  dif.autumn<-coef(summary(Geo.model_Autumn[[i]]))$cond[4]
+  dif.winter<-coef(summary(Geo.model_Winter[[i]]))$cond[4]
+    
+  # store model slope difference 
+  GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-(-dif.spring)
+  GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-(-dif.summer)
+  GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-(-dif.autumn)
+  GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-(-dif.winter)
+    # NB: we use -dif.spring etc. here to ensure the direction of the model differences is the same as for insects (i.e. comparing model slope 1 to slope 0 and not the other way round)
+  
+  
+   # get the standard error, T value, and p-value for the model slope difference between condition = 0 and condition = 1
+  diff.se.spring<-coef(summary(Geo.model_Spring[[i]]))$cond[4,2]
+  diff.T.spring<-coef(summary(Geo.model_Spring[[i]]))$cond[4,3]
+  diff.p.spring<-coef(summary(Geo.model_Spring[[i]]))$cond[4,4]
+  diff.se.summer<-coef(summary(Geo.model_Summer[[i]]))$cond[4,2]
+  diff.T.summer<-coef(summary(Geo.model_Summer[[i]]))$cond[4,3]
+  diff.p.summer<-coef(summary(Geo.model_Summer[[i]]))$cond[4,4]
+  diff.se.autumn<-coef(summary(Geo.model_Autumn[[i]]))$cond[4,2]
+  diff.T.autumn<-coef(summary(Geo.model_Autumn[[i]]))$cond[4,3]
+  diff.p.autumn<-coef(summary(Geo.model_Autumn[[i]]))$cond[4,4]
+  diff.se.winter<-coef(summary(Geo.model_Winter[[i]]))$cond[4,2]
+  diff.T.winter<-coef(summary(Geo.model_Winter[[i]]))$cond[4,3]
+  diff.p.winter<-coef(summary(Geo.model_Winter[[i]]))$cond[4,4]
+  
+  
+  # store slope difference standard error
+  GLMM.Geo_Szn$diff.se[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-diff.se.spring
+  GLMM.Geo_Szn$diff.se[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-diff.se.summer
+  GLMM.Geo_Szn$diff.se[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-diff.se.autumn
+  GLMM.Geo_Szn$diff.se[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-diff.se.winter
+
+
+  # store slope difference T value
+  GLMM.Geo_Szn$diff.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-(-diff.T.spring)
+  GLMM.Geo_Szn$diff.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-(-diff.T.summer)
+  GLMM.Geo_Szn$diff.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-(-diff.T.autumn)
+  GLMM.Geo_Szn$diff.T[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-(-diff.T.winter)
+     # NB: we use -dif.spring etc. here to ensure the direction of the model differences is the same as for insects (i.e. comparing model slope 1 to slope 0 and not the other way round)
+
+  
+  # store slope difference p value
+  GLMM.Geo_Szn$diff.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-diff.p.spring
+  GLMM.Geo_Szn$diff.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-diff.p.summer
+  GLMM.Geo_Szn$diff.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-diff.p.autumn
+  GLMM.Geo_Szn$diff.pval[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-diff.p.winter
+  
+
+  # calculate the absolute slope difference based on whether slopes get steeper or not
+  GLMM.Geo_Szn$abs.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring']<-
+    abs.model.slope(slope1 = GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring'],
+                slope2 = GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring'],
+                slopedif = GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Spring'])
+
+  GLMM.Geo_Szn$abs.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer']<-
+    abs.model.slope(slope1 = GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer'],
+                slope2 = GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer'],
+                slopedif = GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Summer'])
+  
+  GLMM.Geo_Szn$abs.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn']<-
+    abs.model.slope(slope1 = GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn'],
+                slope2 = GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn'],
+                slopedif = GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Autumn'])
+    
+  GLMM.Geo_Szn$abs.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter']<-
+    abs.model.slope(slope1 = GLMM.Geo_Szn$control.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter'],
+                slope2 = GLMM.Geo_Szn$binary.slope[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter'],
+                slopedif = GLMM.Geo_Szn$slope.diff[GLMM.Geo_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Geo_Szn$Season %in% 'Winter'])
+  
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.Geo_Szn$binary.sig[GLMM.Geo_Szn$binary.pval > 0.05]<-0
+GLMM.Geo_Szn$diff.sig[GLMM.Geo_Szn$diff.pval > 0.05]<-0
+
+```
+
+```{r}
+
+# Loop through models of all indices for anthropohony
+for (i in 1:length(Anthro.model_Szn)) {
+
+   # get the model slopes
+  spring0<-coef(summary(Anthro.model_Spring[[i]]))$cond[2]+coef(summary(Anthro.model_Spring[[i]]))$cond[4] # Anthropophony = 0, spring
+  spring1<-coef(summary(Anthro.model_Spring[[i]]))$cond[2] # Anthropophony = 1, Spring
+  summer0<-coef(summary(Anthro.model_Summer[[i]]))$cond[2]+coef(summary(Anthro.model_Summer[[i]]))$cond[4] # Anthropophony = 0, summer
+  summer1<-coef(summary(Anthro.model_Summer[[i]]))$cond[2] # Anthropophony = 1, summer
+  Autumn0<-coef(summary(Anthro.model_Autumn[[i]]))$cond[2]+coef(summary(Anthro.model_Autumn[[i]]))$cond[4] # Anthropophony = 0, Autumn
+  Autumn1<-coef(summary(Anthro.model_Autumn[[i]]))$cond[2] # Anthropophony = 1, Autumn
+  Winter0<-coef(summary(Anthro.model_Winter[[i]]))$cond[2]+coef(summary(Anthro.model_Winter[[i]]))$cond[4] # Anthropophony = 0, Winter
+  Winter1<-coef(summary(Anthro.model_Winter[[i]]))$cond[2] # Anthropophony = 1, Winter
+  
+  
+  # store model slopes in our dataframe
+  GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-spring0
+  GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-spring1
+  GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-summer0
+  GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-summer1
+  GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-Autumn0
+  GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-Autumn1
+  GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-Winter0
+  GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-Winter1  
+  
+  
+  #get the standard error for the model slope of sonic condition = 1
+  se.spring1<-sqrt(vcov(Anthro.model_Spring[[i]])$cond[2,2]+vcov(Anthro.model_Spring[[i]])$cond[4,4]+(2*vcov(Anthro.model_Spring[[i]])$cond[2,4]))  
+  se.summer1<-sqrt(vcov(Anthro.model_Summer[[i]])$cond[2,2]+vcov(Anthro.model_Summer[[i]])$cond[4,4]+(2*vcov(Anthro.model_Summer[[i]])$cond[2,4]))  
+  se.autumn1<-sqrt(vcov(Anthro.model_Autumn[[i]])$cond[2,2]+vcov(Anthro.model_Autumn[[i]])$cond[4,4]+(2*vcov(Anthro.model_Autumn[[i]])$cond[2,4]))  
+  se.winter1<-sqrt(vcov(Anthro.model_Winter[[i]])$cond[2,2]+vcov(Anthro.model_Winter[[i]])$cond[4,4]+(2*vcov(Anthro.model_Winter[[i]])$cond[2,4]))  
+
+
+  # Store T statistic for model slope of sonic condition = 1
+  GLMM.Anthro_Szn$binary.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-spring1/se.spring1
+  GLMM.Anthro_Szn$binary.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-summer1/se.summer1
+  GLMM.Anthro_Szn$binary.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-Autumn1/se.autumn1
+  GLMM.Anthro_Szn$binary.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-Winter1/se.winter1
+  
+  
+  # get P values for model slopes from T statistic using multi.slope_P() function generated above
+  P.spring1<-multi.slope_P(T.stat = spring1/se.spring1,model = Anthro.model_Szn[[i]])
+  P.summer1<-multi.slope_P(T.stat = summer1/se.summer1,model = Anthro.model_Szn[[i]])
+  P.autumn1<-multi.slope_P(T.stat = Autumn1/se.autumn1,model = Anthro.model_Szn[[i]])
+  P.winter1<-multi.slope_P(T.stat = Winter1/se.winter1,model = Anthro.model_Szn[[i]])
+  
+  
+  # Store significance (2-sided P values) for model slope of sonic condition = 1
+  GLMM.Anthro_Szn$binary.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-P.spring1
+  GLMM.Anthro_Szn$binary.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-P.summer1
+  GLMM.Anthro_Szn$binary.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-P.autumn1
+  GLMM.Anthro_Szn$binary.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-P.winter1
+
+  
+  # get the model slope difference between condition = 0 and condition = 1
+  dif.spring<-coef(summary(Anthro.model_Spring[[i]]))$cond[4]
+  dif.summer<-coef(summary(Anthro.model_Summer[[i]]))$cond[4]
+  dif.autumn<-coef(summary(Anthro.model_Autumn[[i]]))$cond[4]
+  dif.winter<-coef(summary(Anthro.model_Winter[[i]]))$cond[4]
+  
+    
+  # store model slope difference 
+  GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-(-dif.spring)
+  GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-(-dif.summer)
+  GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-(-dif.autumn)
+  GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-(-dif.winter)
+    # NB: we use -dif.spring etc. here to ensure the direction of the model differences is the same as for insects (i.e. comparing model slope 1 to slope 0 and not the other way round)
+
+  
+  # get the standard error, T value, and p-value for the model slope difference between condition = 0 and condition = 1
+  diff.se.spring<-coef(summary(Anthro.model_Spring[[i]]))$cond[4,2]
+  diff.T.spring<-coef(summary(Anthro.model_Spring[[i]]))$cond[4,3]
+  diff.p.spring<-coef(summary(Anthro.model_Spring[[i]]))$cond[4,4]
+  diff.se.summer<-coef(summary(Anthro.model_Summer[[i]]))$cond[4,2]
+  diff.T.summer<-coef(summary(Anthro.model_Summer[[i]]))$cond[4,3]
+  diff.p.summer<-coef(summary(Anthro.model_Summer[[i]]))$cond[4,4]
+  diff.se.autumn<-coef(summary(Anthro.model_Autumn[[i]]))$cond[4,2]
+  diff.T.autumn<-coef(summary(Anthro.model_Autumn[[i]]))$cond[4,3]
+  diff.p.autumn<-coef(summary(Anthro.model_Autumn[[i]]))$cond[4,4]
+  diff.se.winter<-coef(summary(Anthro.model_Winter[[i]]))$cond[4,2]
+  diff.T.winter<-coef(summary(Anthro.model_Winter[[i]]))$cond[4,3]
+  diff.p.winter<-coef(summary(Anthro.model_Winter[[i]]))$cond[4,4]
+  
+  
+  # store slope difference standard error
+  GLMM.Anthro_Szn$diff.se[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-diff.se.spring
+  GLMM.Anthro_Szn$diff.se[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-diff.se.summer
+  GLMM.Anthro_Szn$diff.se[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-diff.se.autumn
+  GLMM.Anthro_Szn$diff.se[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-diff.se.winter
+
+
+  # store slope difference T value
+  GLMM.Anthro_Szn$diff.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-(-diff.T.spring)
+  GLMM.Anthro_Szn$diff.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-(-diff.T.summer)
+  GLMM.Anthro_Szn$diff.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-(-diff.T.autumn)
+  GLMM.Anthro_Szn$diff.T[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-(-diff.T.winter)
+     # NB: we use -dif.spring etc. here to ensure the direction of the model differences is the same as for insects (i.e. comparing model slope 1 to slope 0 and not the other way round)
+
+  
+  # store slope difference p value
+  GLMM.Anthro_Szn$diff.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-diff.p.spring
+  GLMM.Anthro_Szn$diff.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-diff.p.summer
+  GLMM.Anthro_Szn$diff.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-diff.p.autumn
+  GLMM.Anthro_Szn$diff.pval[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-diff.p.winter
+  
+  
+  # calculate the absolute slope difference based on whether slopes get steeper or not
+  GLMM.Anthro_Szn$abs.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring']<-
+    abs.model.slope(slope1 = GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring'],
+                slope2 = GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring'],
+                slopedif = GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Spring'])
+
+  GLMM.Anthro_Szn$abs.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer']<-
+    abs.model.slope(slope1 = GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer'],
+                slope2 = GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer'],
+                slopedif = GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Summer'])
+
+  GLMM.Anthro_Szn$abs.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn']<-
+    abs.model.slope(slope1 = GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn'],
+                slope2 = GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn'],
+                slopedif = GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Autumn'])
+  
+  GLMM.Anthro_Szn$abs.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter']<-
+    abs.model.slope(slope1 = GLMM.Anthro_Szn$control.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter'],
+                slope2 = GLMM.Anthro_Szn$binary.slope[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter'],
+                slopedif = GLMM.Anthro_Szn$slope.diff[GLMM.Anthro_Szn$Index %in% colnames(Standard)[i+6] & GLMM.Anthro_Szn$Season %in% 'Winter'])
+
+}
+
+# quickly add whether values are significant or not (0 = nonsig, 1 = significant at p=0.05)
+GLMM.Anthro_Szn$binary.sig[GLMM.Anthro_Szn$binary.pval > 0.05]<-0
+GLMM.Anthro_Szn$diff.sig[GLMM.Anthro_Szn$diff.pval > 0.05]<-0
+
+```
+
+Now we have the same as above (i.e. values of the model slope with vs without the potentially confounding sonic conditions, and the absolute difference in model slope the sonic condition causes, plus the significance of the model where the sonic condition is present), but separated out by season. This gives us a seasonally adjusted measure of the sensitivity of different soundscape indices to these sonic conditions - that is, to what degree do these conditions affect the index ~ richness relationship? 
+
+Now let's make some quick plots showing these results:
+
+```{r}
+
+# reorder the indices based on model slope values - Insects
+GLMM.Insect_Szn$Index<-as.character(GLMM.Insect_Szn$Index)
+GLMM.Insect_Szn$Index<-parse_factor(x = GLMM.Insect_Szn$Index, # factorise indices by model slope results
+                                 ordered = TRUE, 
+                                 include_na = F, 
+                                 levels = unique(GLMM.Insect_Szn$Index[order(GLMM.Insect_Szn$abs.diff)]))
+GLMM.Insect_Szn<-GLMM.Insect_Szn[order(GLMM.Insect_Szn$Index),] # Reorder dataframe around new factor levels
+# change significance to factor for plotting
+GLMM.Insect_Szn$binary.sig<-as.character(GLMM.Insect_Szn$binary.sig)
+GLMM.Insect_Szn$binary.sig<-parse_factor(x = GLMM.Insect_Szn$binary.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+GLMM.Insect_Szn$diff.sig<-as.character(GLMM.Insect_Szn$diff.sig)
+GLMM.Insect_Szn$diff.sig<-parse_factor(x = GLMM.Insect_Szn$diff.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+
+# reorder the indices based on model slope values - Geophony
+GLMM.Geo_Szn$Index<-as.character(GLMM.Geo_Szn$Index)
+GLMM.Geo_Szn$Index<-parse_factor(x = GLMM.Geo_Szn$Index, # factorise indices by model slope results
+                                 ordered = TRUE, 
+                                 include_na = F, 
+                                 levels = unique(GLMM.Geo_Szn$Index[order(GLMM.Geo_Szn$abs.diff)]))
+GLMM.Geo_Szn<-GLMM.Geo_Szn[order(GLMM.Geo_Szn$Index),] # Reorder dataframe around new factor levels
+# change significance to factor for plotting
+GLMM.Geo_Szn$binary.sig<-as.character(GLMM.Geo_Szn$binary.sig)
+GLMM.Geo_Szn$binary.sig<-parse_factor(x = GLMM.Geo_Szn$binary.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+GLMM.Geo_Szn$diff.sig<-as.character(GLMM.Geo_Szn$diff.sig)
+GLMM.Geo_Szn$diff.sig<-parse_factor(x = GLMM.Geo_Szn$diff.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+
+
+# reorder the indices based on model slope values - Anthropophony
+GLMM.Anthro_Szn$Index<-as.character(GLMM.Anthro_Szn$Index)
+GLMM.Anthro_Szn$Index<-parse_factor(x = GLMM.Anthro_Szn$Index, # factorise indices by model slope results
+                                 ordered = TRUE, 
+                                 include_na = F, 
+                                 levels = unique(GLMM.Anthro_Szn$Index[order(GLMM.Anthro_Szn$abs.diff)]))
+GLMM.Anthro_Szn<-GLMM.Anthro_Szn[order(GLMM.Anthro_Szn$Index),] # Reorder dataframe around new factor levels
+# change significance to factor for plotting
+GLMM.Anthro_Szn$binary.sig<-as.character(GLMM.Anthro_Szn$binary.sig)
+GLMM.Anthro_Szn$binary.sig<-parse_factor(x = GLMM.Anthro_Szn$binary.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+GLMM.Anthro_Szn$diff.sig<-as.character(GLMM.Anthro_Szn$diff.sig)
+GLMM.Anthro_Szn$diff.sig<-parse_factor(x = GLMM.Anthro_Szn$diff.sig,
+                                       ordered = TRUE,
+                                       include_na = F,
+                                       levels = c("0","1"))
+
+
+```
+
+
+We may have our absolute slope difference values, but as it stands, Sensitivity is a bit counterintuitive. As the value increases, models are less sensitive. So let's quantify our sensitivity metric as the inverse of the absolute difference in model slope: 
+
+```{r}
+
+GLMM.Insect_Szn$Sens<-1-GLMM.Insect_Szn$abs.diff
+GLMM.Geo_Szn$Sens<-1-GLMM.Geo_Szn$abs.diff
+GLMM.Anthro_Szn$Sens<-1-GLMM.Anthro_Szn$abs.diff
+
+```
+
+Let's plot the results:
+
+```{r}
+
+# Plot the results
+ggplot(data = GLMM.Insect_Szn,
+       mapping = aes(x = Index, 
+                     y = Sens, 
+                     ymin = Sens-diff.se, 
+                     ymax = Sens+diff.se, 
+                     label = round(abs.diff,digits = 2)),
+       group = Season) +
+  xlab("Soundscape Index") + 
+  ylab("Sensitivity to Insects") +
+  theme_classic() + guides(alpha = FALSE) +
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(colour = "black"),) + 
+  geom_hline(yintercept = 1,
+             linetype=2) +
+  geom_pointrange(aes(col = Season,
+                      shape=diff.sig),
+                  position = position_dodge(width = 0.75),
+                  fatten = 5) + 
+  geom_text(aes(label=round(abs.diff,digits = 2),
+                group = Season),
+            position = position_dodge(width = 0.75),
+            hjust=-0.25,
+            vjust=-0.25) +
+  scale_y_continuous(limits = c(-0.25,2.75),
+                     breaks = c(-0.25,0,0.25,0.5,0.75,1,1.25,1.5,1.75,2,2.25,2.5,2.75)) + 
+  scale_shape_manual(values = c(1,8), 
+                     guide = FALSE) +
+  coord_flip() +
+  scale_colour_viridis_d(direction = -1,end = 0.9) + 
+  guides(colour = guide_legend(reverse=T,title = "Season"))
+
+```
+
+
+```{r}
+
+# Plot the results
+ggplot(data = GLMM.Geo_Szn,
+       mapping = aes(x = Index, 
+                     y = Sens, 
+                     ymin = Sens-diff.se, 
+                     ymax = Sens+diff.se, 
+                     label = round(abs.diff,digits = 2)),
+       group = Season) +
+  xlab("Soundscape Index") + 
+  ylab("Sensitivity to Geophony") +
+  theme_classic() + guides(alpha = FALSE) +
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(colour = "black"),) + 
+  geom_hline(yintercept = 1,
+             linetype=2) +
+  geom_pointrange(aes(col = Season,
+                      shape=diff.sig),
+                  position = position_dodge(width = 0.75),
+                  fatten = 5) + 
+  geom_text(aes(label=round(abs.diff,digits = 2),
+                group = Season),
+            position = position_dodge(width = 0.75),
+            hjust=-0.25,
+            vjust=-0.25) +
+  scale_y_continuous(limits = c(-0.25,2.75),
+                     breaks = c(-0.25,0,0.25,0.5,0.75,1,1.25,1.5,1.75,2,2.25,2.5,2.75)) + 
+  scale_shape_manual(values = c(1,8), 
+                     guide = FALSE) +
+  coord_flip() +
+  scale_colour_viridis_d(direction = -1,end = 0.9) + 
+  guides(colour = guide_legend(reverse=T,title = "Season"))
+
+
+```
+
+```{r}
+
+# Plot the results
+ggplot(data = GLMM.Anthro_Szn,
+       mapping = aes(x = Index, 
+                     y = Sens, 
+                     ymin = Sens-diff.se, 
+                     ymax = Sens+diff.se, 
+                     label = round(abs.diff,digits = 2)),
+       group = Season) +
+  xlab("Soundscape Index") + 
+  ylab("Sensitivity to Anthropophony") +
+  theme_classic() + guides(alpha = FALSE) +
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(colour = "black"),) + 
+  geom_hline(yintercept = 1,
+             linetype=2) +
+  geom_pointrange(aes(col = Season,
+                      shape=diff.sig),
+                  position = position_dodge(width = 0.75),
+                  fatten = 5) + 
+  geom_text(aes(label=round(abs.diff,digits = 2),
+                group = Season),
+            position = position_dodge(width = 0.75),
+            hjust=-0.25,
+            vjust=-0.25) +
+  scale_y_continuous(limits = c(-0.25,2.75),
+                     breaks = c(-0.25,0,0.25,0.5,0.75,1,1.25,1.5,1.75,2,2.25,2.5,2.75)) + 
+  scale_shape_manual(values = c(1,8), 
+                     guide = FALSE) +
+  coord_flip() +
+  scale_colour_viridis_d(direction = -1,end = 0.9) + 
+  guides(colour = guide_legend(reverse=T,title = "Season"))
+
+
+```
+
+# Relevant references
+
+Bååth, R. (2018). beepr: Easily Play Notification Sounds on any Platform. R package version 1.3.
+  https://CRAN.R-project.org/package=beepr
+  
+Bradfer-Lawrence, T., Bunnefeld, N., Gardner, N., Willis, S.G., & Dent, D.H. (2020). Rapid assessment of avian species richness and abundance using acoustic indices. Ecological Indicators, 115, 106400.
+
+Brooks, M.E., Kristensen, K., van Benthem, K.J., Magnusson, A., Berg, C.W., ... & Bolker, B.M. (2017). glmmTMB Balances Speed and Flexibility Among Packages for Zero-inflated Generalized Linear Mixed Modeling. The R Journal, 9, 378-400.
+
+Ross, S.R.P-J., Friedman, N.R., Yoshimura, M., Yoshida, T., Donohue, I., & Economo, E.P. (Submitted). Utility of acoustic indices for ecological monitoring in complex sonic environments. Ecological Indicators.
+
+Wei, T., & Simko, V. (2017). R package "corrplot": Visualization of a Correlation Matrix (Version 0.84).
+  Available from https://github.com/taiyun/corrplot
+  
