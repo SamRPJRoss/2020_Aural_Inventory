@@ -1,4 +1,6 @@
 # 2020_Aural_Inventory
+<a href="https://zenodo.org/badge/latestdoi/302027419"><img src="https://zenodo.org/badge/302027419.svg" alt="DOI"></a>
+
 R Code and Data from Ross et al. Ecological Indicators
 
 Ross et al. Aural Inventory code.Rmd = R markdown file with all code (requires data from Ross et al. Aural Inventory data.Rda)
